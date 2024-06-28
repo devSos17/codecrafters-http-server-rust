@@ -1,5 +1,5 @@
 use std::{
-    io::Write,
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
 };
 
@@ -10,23 +10,102 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_client(stream),
+            Ok(stream) => handler(stream),
             Err(e) => {
-                println!("error: {}", e);
+                eprintln!("error: {}", e);
             }
         }
     }
 }
 
-fn handle_client(mut stream: TcpStream) {
-    let bod: Option<ResponseBody> = Some(ResponseBody::create("Hola mundo".to_string()));
-    let res: Response = Response::create(HttpStatus::OK, None, bod);
-    println!("{}-{}", res.status.value(), stream.peer_addr().unwrap());
-    if let Err(e) = stream.write_all(&res.bvalue()) {
-        println!("Epic fail:{}", e);
+fn handler(mut stream: TcpStream) {
+    // request
+    let mut req_buf: Vec<u8> = vec![0; 512];
+    let req: Request;
+    let mut res: Response = Response::create(HttpStatus::Continue, None, None);
+    match stream.read(&mut req_buf) {
+        Ok(len) => {
+            let req_str = String::from_utf8_lossy(&req_buf[..len]);
+            println!("Request: {:?}", &req_str);
+            req = Request::create(req_str.to_string());
+            // Choose response
+            match req.req_line.method {
+                HttpMethod::GET => match req.req_line.target.as_str() {
+                    "/" => res.status.status = HttpStatus::OK,
+                    _ => res.status.status = HttpStatus::NotFound,
+                },
+                _ => res = Response::create(HttpStatus::BadRequest, None, None),
+            }
+        }
+        Err(e) => eprintln!("Request error:{}", e),
+    }
+
+    // response
+    match stream.write_all(&res.bvalue()) {
+        Ok(_) => println!(
+            "Response: {}-{}",
+            res.status.value(),
+            stream.peer_addr().unwrap()
+        ),
+        Err(e) => eprintln!("Response error:{}", e),
     }
 }
 
+#[derive(Debug)]
+struct Request {
+    req_line: RequestLine,
+    header: Option<Headers>,
+    body: Option<HttpBody>,
+}
+
+impl Request {
+    fn create(req: String) -> Self {
+        let mut req_split = req.split("\n\r");
+        let req_line = RequestLine::create(req_split.next().unwrap());
+        // let headers =
+        // let body =
+        Request {
+            req_line,
+            header: None,
+            body: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RequestLine {
+    method: HttpMethod,
+    target: String,
+    version: HttpVersion,
+}
+
+impl RequestLine {
+    fn create(req_line: &str) -> Self {
+        let mut i = req_line.split(" ");
+        RequestLine {
+            method: HttpMethod::from_str(i.next().unwrap()),
+            target: i.next().unwrap().to_string(),
+            version: HttpVersion::from_str(i.next().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HttpMethod {
+    GET,
+    POST,
+}
+
+impl HttpMethod {
+    fn from_str(method: &str) -> Self {
+        match method {
+            "GET" => Self::GET,
+            _ => Self::GET,
+        }
+    }
+}
+
+#[derive(Debug)]
 enum HttpVersion {
     HTTP1_1,
 }
@@ -34,7 +113,14 @@ enum HttpVersion {
 impl HttpVersion {
     fn value(&self) -> &str {
         match *self {
-            HttpVersion::HTTP1_1 => "HTTP/1.1",
+            Self::HTTP1_1 => "HTTP/1.1",
+        }
+    }
+
+    fn from_str(version: &str) -> Self {
+        match version {
+            "HTTP/1.1" => Self::HTTP1_1,
+            _ => Self::HTTP1_1,
         }
     }
 }
@@ -86,46 +172,46 @@ enum HttpStatus {
 impl HttpStatus {
     fn value(&self) -> (u16, &str) {
         match *self {
-            HttpStatus::Continue => (100, "Continue"),
-            HttpStatus::SwitchingProtocols => (101, "Switching Protocols"),
-            HttpStatus::OK => (200, "OK"),
-            HttpStatus::Created => (201, "Created"),
-            HttpStatus::Accepted => (202, "Accepted"),
-            HttpStatus::NonAuthoritativeInformation => (203, "Non-Authoritative Information"),
-            HttpStatus::NoContent => (204, "No Content"),
-            HttpStatus::ResetContent => (205, "Reset Content"),
-            HttpStatus::PartialContent => (206, "Partial Content"),
-            HttpStatus::MultipleChoices => (300, "Multiple Choices"),
-            HttpStatus::MovedPermanently => (301, "Moved Permanently"),
-            HttpStatus::Found => (302, "Found"),
-            HttpStatus::SeeOther => (303, "See Other"),
-            HttpStatus::NotModified => (304, "Not Modified"),
-            HttpStatus::UseProxy => (305, "Use Proxy"),
-            HttpStatus::TemporaryRedirect => (307, "Temporary Redirect"),
-            HttpStatus::BadRequest => (400, "Bad Request"),
-            HttpStatus::Unauthorized => (401, "Unauthorized"),
-            HttpStatus::PaymentRequired => (402, "Payment Required"),
-            HttpStatus::Forbidden => (403, "Forbidden"),
-            HttpStatus::NotFound => (404, "Not Found"),
-            HttpStatus::MethodNotAllowed => (405, "Method Not Allowed"),
-            HttpStatus::NotAcceptable => (406, "Not Acceptable"),
-            HttpStatus::ProxyAuthenticationRequired => (407, "Proxy Authentication Required"),
-            HttpStatus::RequestTimeout => (408, "Request Time-out"),
-            HttpStatus::Conflict => (409, "Conflict"),
-            HttpStatus::Gone => (410, "Gone"),
-            HttpStatus::LengthRequired => (411, "Length Required"),
-            HttpStatus::PreconditionFailed => (412, "Precondition Failed"),
-            HttpStatus::RequestEntityTooLarge => (413, "Request Entity Too Large"),
-            HttpStatus::RequestURITooLarge => (414, "Request-URI Too Large"),
-            HttpStatus::UnsupportedMediaType => (415, "Unsupported Media Type"),
-            HttpStatus::Requestedrangenotsatisfiable => (416, "Requested range not satisfiable"),
-            HttpStatus::ExpectationFailed => (417, "Expectation Failed"),
-            HttpStatus::InternalServerError => (500, "Internal Server Error"),
-            HttpStatus::NotImplemented => (501, "Not Implemented"),
-            HttpStatus::BadGateway => (502, "Bad Gateway"),
-            HttpStatus::ServiceUnavailable => (503, "Service Unavailable"),
-            HttpStatus::GatewayTimeout => (504, "Gateway Time-out"),
-            HttpStatus::HTTPVersionNotSupported => (505, "HTTP Version not supported"),
+            Self::Continue => (100, "Continue"),
+            Self::SwitchingProtocols => (101, "Switching Protocols"),
+            Self::OK => (200, "OK"),
+            Self::Created => (201, "Created"),
+            Self::Accepted => (202, "Accepted"),
+            Self::NonAuthoritativeInformation => (203, "Non-Authoritative Information"),
+            Self::NoContent => (204, "No Content"),
+            Self::ResetContent => (205, "Reset Content"),
+            Self::PartialContent => (206, "Partial Content"),
+            Self::MultipleChoices => (300, "Multiple Choices"),
+            Self::MovedPermanently => (301, "Moved Permanently"),
+            Self::Found => (302, "Found"),
+            Self::SeeOther => (303, "See Other"),
+            Self::NotModified => (304, "Not Modified"),
+            Self::UseProxy => (305, "Use Proxy"),
+            Self::TemporaryRedirect => (307, "Temporary Redirect"),
+            Self::BadRequest => (400, "Bad Request"),
+            Self::Unauthorized => (401, "Unauthorized"),
+            Self::PaymentRequired => (402, "Payment Required"),
+            Self::Forbidden => (403, "Forbidden"),
+            Self::NotFound => (404, "Not Found"),
+            Self::MethodNotAllowed => (405, "Method Not Allowed"),
+            Self::NotAcceptable => (406, "Not Acceptable"),
+            Self::ProxyAuthenticationRequired => (407, "Proxy Authentication Required"),
+            Self::RequestTimeout => (408, "Request Time-out"),
+            Self::Conflict => (409, "Conflict"),
+            Self::Gone => (410, "Gone"),
+            Self::LengthRequired => (411, "Length Required"),
+            Self::PreconditionFailed => (412, "Precondition Failed"),
+            Self::RequestEntityTooLarge => (413, "Request Entity Too Large"),
+            Self::RequestURITooLarge => (414, "Request-URI Too Large"),
+            Self::UnsupportedMediaType => (415, "Unsupported Media Type"),
+            Self::Requestedrangenotsatisfiable => (416, "Requested range not satisfiable"),
+            Self::ExpectationFailed => (417, "Expectation Failed"),
+            Self::InternalServerError => (500, "Internal Server Error"),
+            Self::NotImplemented => (501, "Not Implemented"),
+            Self::BadGateway => (502, "Bad Gateway"),
+            Self::ServiceUnavailable => (503, "Service Unavailable"),
+            Self::GatewayTimeout => (504, "Gateway Time-out"),
+            Self::HTTPVersionNotSupported => (505, "HTTP Version not supported"),
         }
     }
 }
@@ -150,19 +236,23 @@ impl StatusLine {
     }
 }
 
-struct Header {}
-impl Header {
+#[derive(Debug)]
+struct Headers {}
+
+impl Headers {
     fn value(&self) -> String {
         todo!()
     }
 }
-struct ResponseBody {
+
+#[derive(Debug)]
+struct HttpBody {
     content: String,
 }
 
-impl ResponseBody {
+impl HttpBody {
     fn create(body: String) -> Self {
-        ResponseBody { content: body }
+        HttpBody { content: body }
     }
     fn value(&self) -> String {
         self.content.clone()
@@ -170,12 +260,12 @@ impl ResponseBody {
 }
 struct Response {
     status: StatusLine,
-    header: Option<Header>,
-    body: Option<ResponseBody>,
+    header: Option<Headers>,
+    body: Option<HttpBody>,
 }
 
 impl Response {
-    fn create(status: HttpStatus, header: Option<Header>, body: Option<ResponseBody>) -> Self {
+    fn create(status: HttpStatus, header: Option<Headers>, body: Option<HttpBody>) -> Self {
         Response {
             status: StatusLine::create(status, None),
             header,
