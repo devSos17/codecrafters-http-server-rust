@@ -21,19 +21,19 @@ fn main() {
 fn handler(mut stream: TcpStream) {
     // request
     let mut req_buf: Vec<u8> = vec![0; 512];
-    let req: Request;
     let mut res: Response = Response::create(HttpStatus::Continue, None, None);
     match stream.read(&mut req_buf) {
         Ok(len) => {
             let req_str = String::from_utf8_lossy(&req_buf[..len]);
-            println!("Request: {:?}", &req_str);
-            req = Request::create(req_str.to_string());
+            // println!("Request: {:?}", &req_str);
+            let req = Request::create(req_str.to_string());
             // Choose response
             let target = req.req_line.target.as_str();
             match target {
-                "/" => res.status.status = HttpStatus::OK,
+                "/" => res.set_status(HttpStatus::OK),
+                "/user-agent" => user_agent(&req, &mut res),
                 _ if target.starts_with("/echo") => echo_redirect(target, &mut res),
-                _ => res.status.status = HttpStatus::NotFound,
+                _ => res.set_status(HttpStatus::NotFound),
             }
         }
         Err(e) => eprintln!("Request error:{}", e),
@@ -41,23 +41,25 @@ fn handler(mut stream: TcpStream) {
 
     // response
     match stream.write_all(&res.bvalue()) {
-        Ok(_) => println!(
-            "Response: {}-{}",
-            res.status.value(),
-            stream.peer_addr().unwrap()
-        ),
+        Ok(_) => {
+            // dbg!(res);
+            println!(
+                "Response: {} -> {}",
+                res.status.value(),
+                stream.peer_addr().unwrap()
+            )
+        }
         Err(e) => eprintln!("Response error:{}", e),
     }
 }
 
 // Routing?
-
 fn echo_redirect(target: &str, res: &mut Response) {
     if target.len() < 7 {
-        res.status.status = HttpStatus::BadRequest;
+        res.set_status(HttpStatus::BadRequest);
         return;
     }
-    res.status.status = HttpStatus::OK;
+    res.set_status(HttpStatus::OK);
     // from /echo/ (7th position -> 6)
     let content = target.split_at(6).1.to_string();
     // make headers..
@@ -67,10 +69,32 @@ fn echo_redirect(target: &str, res: &mut Response) {
     res.body = Some(HttpBody::create(content));
 }
 
+fn user_agent(req: &Request, res: &mut Response) {
+    let headers = <Option<Vec<Header>> as Clone>::clone(&req.headers).unwrap();
+    // dbg!(headers);
+    for header in headers {
+        // if we have an User-agent
+        if header.name == "User-Agent" {
+            res.set_status(HttpStatus::OK);
+            let content = header.value;
+
+            let content_type = Header::create("Content-type", "text/plain");
+            let content_length =
+                Header::create("Content-length", content.len().to_string().as_str());
+            res.headers = Some(vec![content_type, content_length]);
+            res.body = Some(HttpBody::create(content));
+            return;
+        }
+    }
+    res.set_status(HttpStatus::BadRequest);
+}
+
+// STRUCTS...
+
 #[derive(Debug)]
 struct Request {
     req_line: RequestLine,
-    header: Option<Vec<Header>>,
+    headers: Option<Vec<Header>>,
     body: Option<HttpBody>,
 }
 
@@ -78,12 +102,45 @@ impl Request {
     fn create(req: String) -> Self {
         let mut req_split = req.split("\r\n");
         let req_line = RequestLine::create(req_split.next().unwrap());
-        // let headers =
-        // let body =
+        // Headers
+        let mut headers: Vec<Header> = Vec::new();
+        for line in req_split.by_ref() {
+            if line.is_empty() {
+                // if empty line double CRLF -> Body
+                break;
+            }
+            // read header
+            let (name, value) = line.split_once(": ").unwrap();
+            // println!("Request: Header({name}) = {value}");
+            headers.push(Header::create(name, value))
+        }
+        // check if empty headers
+        let headers = if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        };
+
+        // Body
+        let mut body: String = Default::default();
+        for line in req_split {
+            body.push_str(line);
+        }
+        // check if empty headers
+        let body = if body.is_empty() {
+            None
+        } else {
+            Some(HttpBody::create(body))
+        };
+
+        // dbg!(&req_line);
+        // dbg!(&headers);
+        // dbg!(&body);
+
         Request {
             req_line,
-            header: None,
-            body: None,
+            headers,
+            body,
         }
     }
 }
@@ -97,7 +154,7 @@ struct RequestLine {
 
 impl RequestLine {
     fn create(req_line: &str) -> Self {
-        let mut i = req_line.split(" ");
+        let mut i = req_line.split(' ');
         RequestLine {
             method: HttpMethod::from_str(i.next().unwrap()),
             target: i.next().unwrap().to_string(),
@@ -108,15 +165,15 @@ impl RequestLine {
 
 #[derive(Debug)]
 enum HttpMethod {
-    GET,
-    // POST,
+    Get,
+    // Post,
 }
 
 impl HttpMethod {
     fn from_str(method: &str) -> Self {
         match method {
-            "GET" => Self::GET,
-            _ => Self::GET,
+            "GET" => Self::Get,
+            _ => Self::Get,
         }
     }
 }
@@ -141,6 +198,7 @@ impl HttpVersion {
     }
 }
 
+#[derive(Debug)]
 /* from [RFC 2616](https://www.rfc-editor.org/rfc/rfc2616) */
 enum HttpStatus {
     Continue,
@@ -232,6 +290,7 @@ impl HttpStatus {
     }
 }
 
+#[derive(Debug)]
 struct StatusLine {
     status: HttpStatus,
     version: HttpVersion,
@@ -252,7 +311,7 @@ impl StatusLine {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Header {
     name: String,
     value: String,
@@ -283,6 +342,8 @@ impl HttpBody {
         self.content.clone()
     }
 }
+
+#[derive(Debug)]
 struct Response {
     status: StatusLine,
     headers: Option<Vec<Header>>,
@@ -321,5 +382,9 @@ impl Response {
     fn bvalue(&self) -> Vec<u8> {
         let val: String = self.value();
         val.into_bytes()
+    }
+
+    fn set_status(&mut self, status: HttpStatus) {
+        self.status.status = status;
     }
 }
