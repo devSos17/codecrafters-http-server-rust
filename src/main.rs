@@ -1,6 +1,10 @@
 use std::{
+    env,
+    error::Error,
+    fs::File,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::Path,
 };
 
 fn main() {
@@ -32,7 +36,8 @@ fn handler(mut stream: TcpStream) {
             match target {
                 "/" => res.set_status(HttpStatus::OK),
                 "/user-agent" => user_agent(&req, &mut res),
-                _ if target.starts_with("/echo") => echo_redirect(target, &mut res),
+                _ if target.starts_with("/echo") => echo(target, &mut res),
+                _ if target.starts_with("/files") => files(target, &mut res),
                 _ => res.set_status(HttpStatus::NotFound),
             }
         }
@@ -54,43 +59,92 @@ fn handler(mut stream: TcpStream) {
 }
 
 // Routing?
-fn echo_redirect(target: &str, res: &mut Response) {
+fn echo(target: &str, res: &mut Response) {
     if target.len() < 7 {
+        // lenght of /echo/
         res.set_status(HttpStatus::BadRequest);
         return;
     }
+    let content = &target[6..]; // from /echo/ (7th position -> 6)
     res.set_status(HttpStatus::OK);
-    // from /echo/ (7th position -> 6)
-    let content = target.split_at(6).1.to_string();
-    // make headers..
-    let content_type = Header::create("Content-type", "text/plain");
-    let content_length = Header::create("Content-length", content.len().to_string().as_str());
-    res.headers = Some(vec![content_type, content_length]);
-    res.body = Some(HttpBody::create(content));
+    res.body = Some(HttpBody::create(content.to_string()));
 }
 
 fn user_agent(req: &Request, res: &mut Response) {
     let headers = <Option<Vec<Header>> as Clone>::clone(&req.headers).unwrap();
     // dbg!(headers);
-    for header in headers {
-        // if we have an User-agent
-        if header.name == "User-Agent" {
-            res.set_status(HttpStatus::OK);
-            let content = header.value;
-
-            let content_type = Header::create("Content-type", "text/plain");
-            let content_length =
-                Header::create("Content-length", content.len().to_string().as_str());
-            res.headers = Some(vec![content_type, content_length]);
-            res.body = Some(HttpBody::create(content));
-            return;
-        }
+    if let Some(header) = headers.iter().find(|header| header.name == "User-Agent") {
+        res.set_status(HttpStatus::OK);
+        let content = &header.value;
+        res.body = Some(HttpBody::create(content.to_string()));
+        return;
     }
     res.set_status(HttpStatus::BadRequest);
 }
 
-// STRUCTS...
+fn files(target: &str, res: &mut Response) {
+    if target.len() < 8 {
+        // lenght of /files/
+        res.set_status(HttpStatus::BadRequest);
+        return;
+    }
+    let query = &target[7..]; // /files/..
+    let dir = get_config("directory").unwrap_or("/tmp/rust-server".to_string());
 
+    let file_path = format!("{}/{}", dir, query);
+    let path = Path::new(&file_path);
+
+    if !path.exists() {
+        res.set_status(HttpStatus::NotFound);
+        return;
+    }
+
+    match File::open(&file_path) {
+        Ok(mut file) => {
+            let mut content = String::new();
+            match file.read_to_string(&mut content) {
+                Ok(size) => {
+                    let content_type = Header::create("Content-type", "application/octet-stream");
+                    let content_length = Header::create("Content-length", &size.to_string());
+                    res.headers = Some(vec![content_type, content_length]);
+
+                    res.set_status(HttpStatus::OK);
+                    res.body = Some(HttpBody::create(content.to_string()));
+                }
+                Err(err) => {
+                    res.set_status(HttpStatus::InternalServerError);
+                    res.body = Some(HttpBody::create(err.to_string()));
+                }
+            }
+        }
+        Err(_) => {
+            res.set_status(HttpStatus::InternalServerError);
+        }
+    }
+}
+
+// Utils
+fn get_config(config: &str) -> Option<String> {
+    // TODO: get from config file
+    // if let None = conf {
+    //     return None;
+    // }
+    get_arg(config)
+}
+
+fn get_arg(config: &str) -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    let config_flag = format!("--{}", config);
+    args.windows(2).find_map(|window| {
+        if window[0] == config_flag {
+            Some(window[1].clone())
+        } else {
+            None
+        }
+    })
+}
+
+// STRUCTS...
 #[derive(Debug)]
 struct Request {
     req_line: RequestLine,
@@ -235,7 +289,7 @@ enum HttpStatus {
     // UnsupportedMediaType,
     // Requestedrangenotsatisfiable,
     // ExpectationFailed,
-    // InternalServerError,
+    InternalServerError,
     // NotImplemented,
     // BadGateway,
     // ServiceUnavailable,
@@ -280,7 +334,7 @@ impl HttpStatus {
             // Self::UnsupportedMediaType => (415, "Unsupported Media Type"),
             // Self::Requestedrangenotsatisfiable => (416, "Requested range not satisfiable"),
             // Self::ExpectationFailed => (417, "Expectation Failed"),
-            // Self::InternalServerError => (500, "Internal Server Error"),
+            Self::InternalServerError => (500, "Internal Server Error"),
             // Self::NotImplemented => (501, "Not Implemented"),
             // Self::BadGateway => (502, "Bad Gateway"),
             // Self::ServiceUnavailable => (503, "Service Unavailable"),
@@ -369,7 +423,25 @@ impl Response {
                 }
                 s
             }
-            None => "".to_string(),
+            None => {
+                if let Some(body) = &self.body {
+                    // asume text body but empty headers
+                    let content = body.value();
+
+                    let content_type = Header::create("Content-type", "text/plain");
+                    let content_length =
+                        Header::create("Content-length", &content.len().to_string());
+
+                    let headers = vec![content_type, content_length];
+                    let mut s: String = Default::default();
+                    for header in headers {
+                        s.push_str(header.value().as_str());
+                    }
+                    s
+                } else {
+                    "".to_string()
+                }
+            }
         };
         let body: String = match &self.body {
             Some(body) => body.value(),
