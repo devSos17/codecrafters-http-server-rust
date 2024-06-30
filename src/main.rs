@@ -1,6 +1,5 @@
 use std::{
     env,
-    error::Error,
     fs::File,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -28,17 +27,21 @@ fn handler(mut stream: TcpStream) {
     let mut res: Response = Response::create(HttpStatus::Continue, None, None);
     match stream.read(&mut req_buf) {
         Ok(len) => {
-            let req_str = String::from_utf8_lossy(&req_buf[..len]);
-            // println!("Request: {:?}", &req_str);
-            let req = Request::create(req_str.to_string());
-            // Choose response
-            let target = req.req_line.target.as_str();
-            match target {
-                "/" => res.set_status(HttpStatus::OK),
-                "/user-agent" => user_agent(&req, &mut res),
-                _ if target.starts_with("/echo") => echo(target, &mut res),
-                _ if target.starts_with("/files") => files(target, &mut res),
-                _ => res.set_status(HttpStatus::NotFound),
+            let req = Request::create(String::from_utf8_lossy(&req_buf[..len]).to_string());
+            // check version
+            match req.req_line.version {
+                HttpVersion::HTTP1_1 => {
+                    // Choose respons
+                    let target = req.req_line.target.as_str();
+                    match target {
+                        "/" => res.set_status(HttpStatus::OK),
+                        "/user-agent" => user_agent(&req, &mut res),
+                        _ if target.starts_with("/echo") => echo(target, &mut res),
+                        _ if target.starts_with("/files") => files(&req, &mut res),
+                        _ => res.set_status(HttpStatus::NotFound),
+                    }
+                }
+                _ => res.set_status(HttpStatus::HTTPVersionNotSupported),
             }
         }
         Err(e) => eprintln!("Request error:{}", e),
@@ -82,9 +85,10 @@ fn user_agent(req: &Request, res: &mut Response) {
     res.set_status(HttpStatus::BadRequest);
 }
 
-fn files(target: &str, res: &mut Response) {
+fn files(req: &Request, res: &mut Response) {
+    let target = &req.req_line.target;
     if target.len() < 8 {
-        // lenght of /files/
+        // length of /files/
         res.set_status(HttpStatus::BadRequest);
         return;
     }
@@ -94,32 +98,60 @@ fn files(target: &str, res: &mut Response) {
     let file_path = format!("{}/{}", dir, query);
     let path = Path::new(&file_path);
 
-    if !path.exists() {
-        res.set_status(HttpStatus::NotFound);
-        return;
-    }
+    match req.req_line.method {
+        HttpMethod::Get => {
+            if !path.exists() {
+                res.set_status(HttpStatus::NotFound);
+                return;
+            }
+            match File::open(&file_path) {
+                Ok(mut file) => {
+                    let mut content = String::new();
+                    match file.read_to_string(&mut content) {
+                        Ok(size) => {
+                            let content_type =
+                                Header::create("Content-type", "application/octet-stream");
+                            let content_length =
+                                Header::create("Content-length", &size.to_string());
+                            res.headers = Some(vec![content_type, content_length]);
 
-    match File::open(&file_path) {
-        Ok(mut file) => {
-            let mut content = String::new();
-            match file.read_to_string(&mut content) {
-                Ok(size) => {
-                    let content_type = Header::create("Content-type", "application/octet-stream");
-                    let content_length = Header::create("Content-length", &size.to_string());
-                    res.headers = Some(vec![content_type, content_length]);
-
-                    res.set_status(HttpStatus::OK);
-                    res.body = Some(HttpBody::create(content.to_string()));
+                            res.set_status(HttpStatus::OK);
+                            res.body = Some(HttpBody::create(content.to_string()));
+                        }
+                        Err(err) => {
+                            res.set_status(HttpStatus::InternalServerError);
+                            res.body = Some(HttpBody::create(err.to_string()));
+                        }
+                    }
                 }
-                Err(err) => {
+                Err(_) => {
                     res.set_status(HttpStatus::InternalServerError);
-                    res.body = Some(HttpBody::create(err.to_string()));
                 }
             }
         }
-        Err(_) => {
-            res.set_status(HttpStatus::InternalServerError);
+        HttpMethod::Post => {
+            if path.exists() {
+                res.set_status(HttpStatus::MethodNotAllowed);
+                return;
+            }
+            match File::create(&file_path) {
+                Ok(mut file) => {
+                    let content = req.body.as_ref().unwrap().bvalue();
+                    match file.write_all(&content) {
+                        Ok(_) => {
+                            res.set_status(HttpStatus::Created);
+                        }
+                        Err(_) => {
+                            res.set_status(HttpStatus::InternalServerError);
+                        }
+                    }
+                }
+                Err(_) => {
+                    res.set_status(HttpStatus::InternalServerError);
+                }
+            }
         }
+        _ => res.set_status(HttpStatus::MethodNotAllowed),
     }
 }
 
@@ -219,14 +251,30 @@ impl RequestLine {
 
 #[derive(Debug)]
 enum HttpMethod {
+    // [MDN](https://developer.mozilla.org/es/docs/Web/HTTP/Methods)
     Get,
-    // Post,
+    Head,
+    Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
 }
 
 impl HttpMethod {
     fn from_str(method: &str) -> Self {
         match method {
             "GET" => Self::Get,
+            "HEAD" => Self::Head,
+            "POST" => Self::Post,
+            "PUT" => Self::Put,
+            "DELETE" => Self::Delete,
+            "CONNECT" => Self::Connect,
+            "OPTIONS" => Self::Options,
+            "TRACE" => Self::Trace,
+            "PATCH" => Self::Patch,
             _ => Self::Get,
         }
     }
@@ -235,18 +283,24 @@ impl HttpMethod {
 #[derive(Debug)]
 enum HttpVersion {
     HTTP1_1,
+    HTTP2,
+    HTTP3,
 }
 
 impl HttpVersion {
     fn value(&self) -> &str {
         match *self {
             Self::HTTP1_1 => "HTTP/1.1",
+            Self::HTTP2 => "HTTP/2",
+            Self::HTTP3 => "HTTP/3",
         }
     }
 
     fn from_str(version: &str) -> Self {
         match version {
             "HTTP/1.1" => Self::HTTP1_1,
+            "HTTP/2" => Self::HTTP2,
+            "HTTP/3" => Self::HTTP3,
             _ => Self::HTTP1_1,
         }
     }
@@ -258,7 +312,7 @@ enum HttpStatus {
     Continue,
     // SwitchingProtocols,
     OK,
-    // Created,
+    Created,
     // Accepted,
     // NonAuthoritativeInformation,
     // NoContent,
@@ -276,7 +330,7 @@ enum HttpStatus {
     // PaymentRequired,
     // Forbidden,
     NotFound,
-    // MethodNotAllowed,
+    MethodNotAllowed,
     // NotAcceptable,
     // ProxyAuthenticationRequired,
     // RequestTimeout,
@@ -294,7 +348,7 @@ enum HttpStatus {
     // BadGateway,
     // ServiceUnavailable,
     // GatewayTimeout,
-    // HTTPVersionNotSupported,
+    HTTPVersionNotSupported,
 }
 
 impl HttpStatus {
@@ -303,7 +357,7 @@ impl HttpStatus {
             Self::Continue => (100, "Continue"),
             // Self::SwitchingProtocols => (101, "Switching Protocols"),
             Self::OK => (200, "OK"),
-            // Self::Created => (201, "Created"),
+            Self::Created => (201, "Created"),
             // Self::Accepted => (202, "Accepted"),
             // Self::NonAuthoritativeInformation => (203, "Non-Authoritative Information"),
             // Self::NoContent => (204, "No Content"),
@@ -321,7 +375,7 @@ impl HttpStatus {
             // Self::PaymentRequired => (402, "Payment Required"),
             // Self::Forbidden => (403, "Forbidden"),
             Self::NotFound => (404, "Not Found"),
-            // Self::MethodNotAllowed => (405, "Method Not Allowed"),
+            Self::MethodNotAllowed => (405, "Method Not Allowed"),
             // Self::NotAcceptable => (406, "Not Acceptable"),
             // Self::ProxyAuthenticationRequired => (407, "Proxy Authentication Required"),
             // Self::RequestTimeout => (408, "Request Time-out"),
@@ -339,7 +393,7 @@ impl HttpStatus {
             // Self::BadGateway => (502, "Bad Gateway"),
             // Self::ServiceUnavailable => (503, "Service Unavailable"),
             // Self::GatewayTimeout => (504, "Gateway Time-out"),
-            // Self::HTTPVersionNotSupported => (505, "HTTP Version not supported"),
+            Self::HTTPVersionNotSupported => (505, "HTTP Version not supported"),
         }
     }
 }
@@ -385,14 +439,18 @@ impl Header {
 
 #[derive(Debug)]
 struct HttpBody {
-    content: String,
+    content: Vec<u8>,
 }
 
 impl HttpBody {
     fn create(body: String) -> Self {
-        HttpBody { content: body }
+        let content = body.as_bytes().to_vec();
+        HttpBody { content }
     }
     fn value(&self) -> String {
+        String::from_utf8_lossy(&self.content).to_string()
+    }
+    fn bvalue(&self) -> Vec<u8> {
         self.content.clone()
     }
 }
