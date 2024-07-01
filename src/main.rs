@@ -28,20 +28,23 @@ fn handler(mut stream: TcpStream) {
     match stream.read(&mut req_buf) {
         Ok(len) => {
             let req = Request::create(String::from_utf8_lossy(&req_buf[..len]).to_string());
-            // check version
-            match req.req_line.version {
-                HttpVersion::HTTP1_1 => {
-                    // Choose respons
-                    let target = req.req_line.target.as_str();
-                    match target {
-                        "/" => res.set_status(HttpStatus::OK),
-                        "/user-agent" => user_agent(&req, &mut res),
-                        _ if target.starts_with("/echo") => echo(target, &mut res),
-                        _ if target.starts_with("/files") => files(&req, &mut res),
-                        _ => res.set_status(HttpStatus::NotFound),
-                    }
+            // check version | only handling http/1.1
+            if let HttpVersion::HTTP1_1 = req.req_line.version {
+                // handle encoding
+                if let Some(header) = req.has_header("Accept-Encoding") {
+                    res.set_encoding(HttpEncoding::from_str(&header.value))
                 }
-                _ => res.set_status(HttpStatus::HTTPVersionNotSupported),
+                // Choose response
+                let target = req.req_line.target.as_str();
+                match target {
+                    "/" => res.set_status(HttpStatus::OK),
+                    "/user-agent" => user_agent(&req, &mut res),
+                    _ if target.starts_with("/echo") => echo(target, &mut res),
+                    _ if target.starts_with("/files") => files(&req, &mut res),
+                    _ => res.set_status(HttpStatus::NotFound),
+                }
+            } else {
+                res.set_status(HttpStatus::HTTPVersionNotSupported)
             }
         }
         Err(e) => eprintln!("Request error:{}", e),
@@ -158,9 +161,6 @@ fn files(req: &Request, res: &mut Response) {
 // Utils
 fn get_config(config: &str) -> Option<String> {
     // TODO: get from config file
-    // if let None = conf {
-    //     return None;
-    // }
     get_arg(config)
 }
 
@@ -228,6 +228,12 @@ impl Request {
             headers,
             body,
         }
+    }
+    fn has_header(&self, query: &str) -> Option<&Header> {
+        if let Some(headers) = &self.headers {
+            return headers.iter().find(|header| header.name == query).clone();
+        }
+        None
     }
 }
 
@@ -399,6 +405,40 @@ impl HttpStatus {
 }
 
 #[derive(Debug)]
+enum HttpEncoding {
+    Gzip,
+    Compress,
+    Deflate,
+    Identity,
+    Br,
+    None,
+}
+
+impl HttpEncoding {
+    fn value(&self) -> &str {
+        match *self {
+            Self::Gzip => "gzip",
+            Self::Compress => "compress",
+            Self::Deflate => "deflate",
+            Self::Identity => "identity",
+            Self::Br => "br",
+            Self::None => "not-supported",
+        }
+    }
+
+    fn from_str(version: &str) -> Self {
+        match version {
+            "gzip" => Self::Gzip,
+            "compress" => Self::Compress,
+            "deflate" => Self::Deflate,
+            "identity" => Self::Identity,
+            "br" => Self::Br,
+            _ => Self::None,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct StatusLine {
     status: HttpStatus,
     version: HttpVersion,
@@ -460,6 +500,7 @@ struct Response {
     status: StatusLine,
     headers: Option<Vec<Header>>,
     body: Option<HttpBody>,
+    encoding: Option<HttpEncoding>,
 }
 
 impl Response {
@@ -468,6 +509,7 @@ impl Response {
             status: StatusLine::create(status, None),
             headers,
             body,
+            encoding: None,
         }
     }
 
@@ -478,6 +520,13 @@ impl Response {
                 let mut s: String = Default::default();
                 for header in headers {
                     s.push_str(header.value().as_str());
+                }
+                if let Some(encoding) = &self.encoding {
+                    s.push_str(
+                        Header::create("Content-Encoding", encoding.value())
+                            .value()
+                            .as_str(),
+                    );
                 }
                 s
             }
@@ -490,7 +539,12 @@ impl Response {
                     let content_length =
                         Header::create("Content-length", &content.len().to_string());
 
-                    let headers = vec![content_type, content_length];
+                    let mut headers = vec![content_type, content_length];
+
+                    if let Some(encoding) = &self.encoding {
+                        headers.push(Header::create("Content-Encoding", encoding.value()));
+                    }
+
                     let mut s: String = Default::default();
                     for header in headers {
                         s.push_str(header.value().as_str());
@@ -505,6 +559,10 @@ impl Response {
             Some(body) => body.value(),
             None => "".to_string(),
         };
+        // TODO: encode message using encoding
+        // if let Some(_encoding) = &self.encoding {
+        //     todo!()
+        // }
         let res: String = format!("{status}\r\n{headers}\r\n{body}");
         res
     }
@@ -516,5 +574,13 @@ impl Response {
 
     fn set_status(&mut self, status: HttpStatus) {
         self.status.status = status;
+    }
+
+    fn set_encoding(&mut self, encoding: HttpEncoding) {
+        if let HttpEncoding::None = encoding {
+            self.encoding = None;
+            return;
+        }
+        self.encoding = Some(encoding);
     }
 }
