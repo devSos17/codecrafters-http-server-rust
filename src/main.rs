@@ -32,7 +32,7 @@ fn handler(mut stream: TcpStream) {
             if let HttpVersion::HTTP1_1 = req.req_line.version {
                 // handle encoding
                 if let Some(header) = req.has_header("Accept-Encoding") {
-                    res.set_encoding(HttpEncoding::from_str(&header.value))
+                    res.set_encoding(HttpEncoding::first_valid(&header))
                 }
                 // Choose response
                 let target = req.req_line.target.as_str();
@@ -411,7 +411,6 @@ enum HttpEncoding {
     Deflate,
     Identity,
     Br,
-    None,
 }
 
 impl HttpEncoding {
@@ -422,19 +421,40 @@ impl HttpEncoding {
             Self::Deflate => "deflate",
             Self::Identity => "identity",
             Self::Br => "br",
-            Self::None => "not-supported",
         }
     }
 
-    fn from_str(version: &str) -> Self {
-        match version {
-            "gzip" => Self::Gzip,
-            "compress" => Self::Compress,
-            "deflate" => Self::Deflate,
-            "identity" => Self::Identity,
-            "br" => Self::Br,
-            _ => Self::None,
+    fn is_valid(&self) -> bool {
+        match *self {
+            Self::Gzip => true,
+            _ => false,
         }
+    }
+
+    fn from_str(version: &str) -> Option<Self> {
+        match version {
+            "gzip" => Some(Self::Gzip),
+            "compress" => Some(Self::Compress),
+            "deflate" => Some(Self::Deflate),
+            "identity" => Some(Self::Identity),
+            "br" => Some(Self::Br),
+            _ => None,
+        }
+    }
+
+    fn first_valid(header: &Header) -> Option<Self> {
+        let vals = header.value.clone();
+        vals.split(", ").find_map(|method| {
+            let encoding = match HttpEncoding::from_str(method) {
+                Some(v) => v,
+                None => return None,
+            };
+            if encoding.is_valid() {
+                Some(encoding)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -576,11 +596,7 @@ impl Response {
         self.status.status = status;
     }
 
-    fn set_encoding(&mut self, encoding: HttpEncoding) {
-        if let HttpEncoding::None = encoding {
-            self.encoding = None;
-            return;
-        }
-        self.encoding = Some(encoding);
+    fn set_encoding(&mut self, encoding: Option<HttpEncoding>) {
+        self.encoding = encoding;
     }
 }
