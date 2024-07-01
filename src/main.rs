@@ -6,6 +6,8 @@ use std::{
     path::Path,
 };
 
+use flate2::{bufread::GzEncoder, Compression};
+
 fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], 4221));
     let listener = TcpListener::bind(addr).unwrap();
@@ -32,7 +34,7 @@ fn handler(mut stream: TcpStream) {
             if let HttpVersion::HTTP1_1 = req.req_line.version {
                 // handle encoding
                 if let Some(header) = req.has_header("Accept-Encoding") {
-                    res.set_encoding(HttpEncoding::first_valid(&header))
+                    res.set_encoding(HttpEncoding::first_valid(header))
                 }
                 // Choose response
                 let target = req.req_line.target.as_str();
@@ -51,7 +53,7 @@ fn handler(mut stream: TcpStream) {
     }
 
     // response
-    match stream.write_all(&res.bvalue()) {
+    match stream.write_all(&res.value()) {
         Ok(_) => {
             // dbg!(res);
             println!(
@@ -139,7 +141,7 @@ fn files(req: &Request, res: &mut Response) {
             }
             match File::create(&file_path) {
                 Ok(mut file) => {
-                    let content = req.body.as_ref().unwrap().bvalue();
+                    let content = req.body.as_ref().unwrap().value();
                     match file.write_all(&content) {
                         Ok(_) => {
                             res.set_status(HttpStatus::Created);
@@ -231,7 +233,7 @@ impl Request {
     }
     fn has_header(&self, query: &str) -> Option<&Header> {
         if let Some(headers) = &self.headers {
-            return headers.iter().find(|header| header.name == query).clone();
+            return headers.iter().find(|header| header.name == query);
         }
         None
     }
@@ -500,18 +502,34 @@ impl Header {
 #[derive(Debug)]
 struct HttpBody {
     content: Vec<u8>,
+    content_compresed: Option<Vec<u8>>,
 }
 
 impl HttpBody {
     fn create(body: String) -> Self {
         let content = body.as_bytes().to_vec();
-        HttpBody { content }
+        HttpBody {
+            content,
+            content_compresed: None,
+        }
     }
-    fn value(&self) -> String {
-        String::from_utf8_lossy(&self.content).to_string()
-    }
-    fn bvalue(&self) -> Vec<u8> {
+    fn value(&self) -> Vec<u8> {
+        if let Some(content) = &self.content_compresed {
+            return content.clone();
+        }
         self.content.clone()
+    }
+    fn len(&self) -> usize {
+        match &self.content_compresed {
+            Some(content) => content.len(),
+            None => self.content.len(),
+        }
+    }
+    fn encode(&mut self, method: &HttpEncoding) {
+        self.content_compresed = match method {
+            HttpEncoding::Gzip => Some(gzip(&self.content)),
+            _ => None,
+        };
     }
 }
 
@@ -533,7 +551,14 @@ impl Response {
         }
     }
 
-    fn value(&self) -> String {
+    fn value(&mut self) -> Vec<u8> {
+        let mut res: Vec<u8> = Vec::new();
+
+        if let Some(encoding) = &self.encoding {
+            if let Some(body) = &mut self.body {
+                body.encode(encoding);
+            }
+        }
         let status: String = self.status.value();
         let headers: String = match &self.headers {
             Some(headers) => {
@@ -552,12 +577,8 @@ impl Response {
             }
             None => {
                 if let Some(body) = &self.body {
-                    // asume text body but empty headers
-                    let content = body.value();
-
                     let content_type = Header::create("Content-type", "text/plain");
-                    let content_length =
-                        Header::create("Content-length", &content.len().to_string());
+                    let content_length = Header::create("Content-length", &body.len().to_string());
 
                     let mut headers = vec![content_type, content_length];
 
@@ -575,21 +596,17 @@ impl Response {
                 }
             }
         };
-        let body: String = match &self.body {
+        res.extend(
+            format!("{status}\r\n{headers}\r\n")
+                .to_string()
+                .into_bytes(),
+        );
+        let body: Vec<u8> = match &self.body {
             Some(body) => body.value(),
-            None => "".to_string(),
+            None => "".into(),
         };
-        // TODO: encode message using encoding
-        // if let Some(_encoding) = &self.encoding {
-        //     todo!()
-        // }
-        let res: String = format!("{status}\r\n{headers}\r\n{body}");
+        res.extend(body);
         res
-    }
-
-    fn bvalue(&self) -> Vec<u8> {
-        let val: String = self.value();
-        val.into_bytes()
     }
 
     fn set_status(&mut self, status: HttpStatus) {
@@ -599,4 +616,13 @@ impl Response {
     fn set_encoding(&mut self, encoding: Option<HttpEncoding>) {
         self.encoding = encoding;
     }
+}
+
+// Encodings...
+
+fn gzip(body: &Vec<u8>) -> Vec<u8> {
+    let mut buff = Vec::new();
+    let mut encoder = GzEncoder::new(&body[..], Compression::default());
+    _ = encoder.read_to_end(&mut buff);
+    buff
 }
